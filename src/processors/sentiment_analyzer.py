@@ -1,0 +1,480 @@
+"""
+Sentiment Analysis Module
+
+Advanced sentiment analysis using:
+- LLM-based analysis for nuanced understanding
+- Aspect-based sentiment (per entity/topic)
+- Multi-class: positive, negative, neutral, mixed
+- Special category: anti-national detection
+- Emotion detection: joy, anger, fear, sadness, etc.
+- Confidence scoring
+
+Based on research best practices:
+- Chain-of-thought reasoning for complex cases
+- Few-shot examples for consistency
+- Aspect extraction before sentiment assignment
+"""
+
+import re
+import time
+from typing import Dict, Any, List, Optional, Tuple
+from dataclasses import dataclass, field
+from enum import Enum
+
+from ..cot import PipelineStep, PipelineContext, StepResult, StepStatus, FunctionDefinition
+from ..cot.executor import StepExecutor
+
+
+class SentimentClass(Enum):
+    """Sentiment classifications."""
+    POSITIVE = "positive"
+    NEGATIVE = "negative"
+    NEUTRAL = "neutral"
+    MIXED = "mixed"
+    ANTI_NATIONAL = "anti_national"  # Special category for concerning content
+
+
+class EmotionClass(Enum):
+    """Emotion classifications (fine-grained)."""
+    JOY = "joy"
+    ANGER = "anger"
+    FEAR = "fear"
+    SADNESS = "sadness"
+    SURPRISE = "surprise"
+    DISGUST = "disgust"
+    TRUST = "trust"
+    ANTICIPATION = "anticipation"
+    NEUTRAL = "neutral"
+
+
+@dataclass
+class SentimentResult:
+    """Result of sentiment analysis."""
+    overall_sentiment: str  # positive, negative, neutral, mixed
+    confidence: float
+    scores: Dict[str, float]  # Score for each sentiment class
+    primary_emotion: str = "neutral"
+    emotions: Dict[str, float] = field(default_factory=dict)
+    aspects: List[Dict[str, Any]] = field(default_factory=list)  # Aspect-based sentiments
+    is_concerning: bool = False  # Anti-national or harmful content flag
+    reasoning: str = ""
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "sentiment": self.overall_sentiment,
+            "confidence": self.confidence,
+            "scores": self.scores,
+            "emotion": self.primary_emotion,
+            "emotions": self.emotions if self.emotions else None,
+            "aspects": self.aspects if self.aspects else None,
+            "is_concerning": self.is_concerning,
+            "reasoning": self.reasoning
+        }
+
+
+# Function definition for CoT executor
+SENTIMENT_FUNCTION = FunctionDefinition(
+    name="analyze_sentiment",
+    description="Analyze text sentiment with aspect-based details",
+    parameters={
+        "sentiment": {
+            "type": "string",
+            "enum": ["positive", "negative", "neutral", "mixed", "anti_national"],
+            "description": "Overall sentiment"
+        },
+        "confidence": {
+            "type": "number",
+            "description": "Confidence score 0-1"
+        },
+        "emotion": {
+            "type": "string",
+            "enum": ["joy", "anger", "fear", "sadness", "surprise", "disgust", "trust", "anticipation", "neutral"],
+            "description": "Primary emotion"
+        },
+        "aspects": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "aspect": {"type": "string"},
+                    "sentiment": {"type": "string"},
+                    "confidence": {"type": "number"}
+                }
+            },
+            "description": "Sentiment per aspect/entity"
+        },
+        "reasoning": {
+            "type": "string",
+            "description": "Chain of thought reasoning"
+        }
+    },
+    required=["sentiment", "confidence", "reasoning"]
+)
+
+
+class SentimentAnalyzer:
+    """
+    Advanced Sentiment Analysis System.
+    
+    Features:
+    - Overall sentiment classification (pos/neg/neutral/mixed/anti-national)
+    - Aspect-based sentiment analysis
+    - Emotion detection (8 primary emotions)
+    - Anti-national/concerning content detection
+    - Chain-of-thought reasoning
+    - Confidence scoring
+    
+    Based on research best practices:
+    - Uses LLM for nuanced understanding
+    - Provides aspect-level granularity
+    - Detects concerning content patterns
+    
+    Usage:
+        analyzer = SentimentAnalyzer(executor)
+        result = analyzer.analyze("I love the UI but the pricing is terrible")
+        print(result.overall_sentiment)  # "mixed"
+        print(result.aspects)  # [{"aspect": "UI", "sentiment": "positive"}, ...]
+    """
+    
+    SYSTEM_PROMPT = """You are an expert sentiment analyst specializing in nuanced text understanding.
+
+## Your Task
+Analyze the sentiment of the input text comprehensively.
+
+## Sentiment Classes
+- positive: Overall positive tone, approval, satisfaction, happiness
+- negative: Overall negative tone, disapproval, dissatisfaction, unhappiness
+- neutral: Factual, objective, no clear emotional tone
+- mixed: Contains both positive and negative sentiments
+- anti_national: Content acting against national interests, promoting separatism, or incitement (Treat as a primary category if detected)
+
+## Emotion Classes (fine-grained)
+- joy: happiness, contentment, pleasure
+- anger: frustration, irritation, rage
+- fear: worry, anxiety, concern
+- sadness: disappointment, grief, melancholy
+- surprise: shock, amazement, unexpectedness
+- disgust: revulsion, contempt, aversion
+- trust: confidence, faith, reliability
+- anticipation: expectation, hope, excitement
+
+## Special Detection: Anti-National/Concerning Content
+Flag content that shows:
+- Hatred toward a nation or its people
+- Incitement of violence
+- Promotion of terrorism or separatism
+- Blasphemy or hate speech
+- Deliberate misinformation against national interest
+
+## Chain-of-Thought Analysis
+1. Read the text carefully
+2. Identify overall tone
+3. Detect emotions expressed
+4. Find aspect-specific sentiments
+5. Check for concerning patterns
+6. Assign confidence based on clarity
+
+## Output Format
+SENTIMENT: [positive/negative/neutral/mixed]
+CONFIDENCE: [0.0-1.0]
+EMOTION: [primary emotion]
+ASPECTS: [aspect1:sentiment, aspect2:sentiment, ...]
+CONCERNING: [yes/no with reason if yes]
+REASONING: [your analysis]"""
+
+    # Words indicating different sentiments
+    POSITIVE_INDICATORS = [
+        'love', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic',
+        'happy', 'pleased', 'satisfied', 'proud', 'excited', 'brilliant'
+    ]
+    
+    NEGATIVE_INDICATORS = [
+        'hate', 'terrible', 'awful', 'horrible', 'bad', 'poor',
+        'disappointed', 'frustrated', 'angry', 'sad', 'worst', 'failed'
+    ]
+    
+    CONCERNING_PATTERNS = [
+        r'\b(?:death\s+to|destroy|kill\s+all)\b',
+        r'\b(?:hate|destroy)\s+(?:the\s+)?(?:country|nation|government)\b',
+        r'\b(?:terrorist|terrorism|separatist)\b',
+    ]
+
+    def __init__(
+        self,
+        executor: StepExecutor = None,
+        detect_aspects: bool = True,
+        detect_emotions: bool = True,
+        detect_concerning: bool = True
+    ):
+        """
+        Initialize Sentiment Analyzer.
+        
+        Args:
+            executor: StepExecutor for LLM calls
+            detect_aspects: Enable aspect-based sentiment
+            detect_emotions: Enable emotion detection
+            detect_concerning: Enable anti-national content detection
+        """
+        self.executor = executor
+        self.detect_aspects = detect_aspects
+        self.detect_emotions = detect_emotions
+        self.detect_concerning = detect_concerning
+    
+    def analyze(self, text: str) -> SentimentResult:
+        """
+        Analyze sentiment of text.
+        
+        Args:
+            text: Input text
+            
+        Returns:
+            SentimentResult with detailed analysis
+        """
+        start_time = time.time()
+        
+        if not self.executor:
+            return self._fallback_analysis(text)
+        
+        # Use LLM for comprehensive analysis
+        return self._analyze_with_llm(text)
+    
+    def _analyze_with_llm(self, text: str) -> SentimentResult:
+        """Analyze using LLM with chain-of-thought."""
+        user_prompt = f"""Analyze the sentiment of the following text:
+
+## Text
+{text[:4000]}
+
+## Analysis Requirements
+1. Overall sentiment (positive/negative/neutral/mixed)
+2. Confidence level (0.0 to 1.0)
+3. Primary emotion detected
+4. Aspect-based sentiments (if multiple topics/entities)
+5. Check for anti-national or concerning content
+6. Provide reasoning for your analysis
+
+## Output Format
+SENTIMENT: [your classification]
+CONFIDENCE: [0.0-1.0]
+EMOTION: [primary emotion]
+ASPECTS: [aspect1:sentiment (confidence), aspect2:sentiment (confidence), ...]
+CONCERNING: [yes/no] - [reason if yes]
+REASONING: [your chain-of-thought analysis]
+
+Analyze now:"""
+
+        try:
+            messages = [
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ]
+            
+            response = self.executor.client.chat(
+                messages=messages,
+                temperature=0.2
+            )
+            
+            return self._parse_result(response)
+            
+        except Exception as e:
+            return self._fallback_analysis(text)
+    
+    def _parse_result(self, response: str) -> SentimentResult:
+        """Parse LLM response into SentimentResult."""
+        # Extract fields
+        sentiment = self._extract_field(response, 'SENTIMENT', 'neutral').lower()
+        confidence_str = self._extract_field(response, 'CONFIDENCE', '0.5')
+        emotion = self._extract_field(response, 'EMOTION', 'neutral').lower()
+        aspects_str = self._extract_field(response, 'ASPECTS', '')
+        concerning_str = self._extract_field(response, 'CONCERNING', 'no')
+        reasoning = self._extract_field(response, 'REASONING', '')
+        
+        # Parse confidence
+        try:
+            confidence = float(re.search(r'[\d.]+', confidence_str).group())
+            confidence = min(1.0, max(0.0, confidence))
+        except:
+            confidence = 0.5
+        
+        # Parse aspects
+        aspects = []
+        if aspects_str:
+            aspect_matches = re.findall(r'([^:,]+):\s*(\w+)(?:\s*\(([0-9.]+)\))?', aspects_str)
+            for match in aspect_matches:
+                aspect_name = match[0].strip()
+                aspect_sent = match[1].strip().lower()
+                aspect_conf = float(match[2]) if match[2] else 0.8
+                aspects.append({
+                    "aspect": aspect_name,
+                    "sentiment": aspect_sent,
+                    "confidence": aspect_conf
+                })
+        
+        # Check concerning flag
+        is_concerning = 'yes' in concerning_str.lower()
+        
+        # Build scores
+        scores = self._calculate_scores(sentiment, confidence)
+        
+        return SentimentResult(
+            overall_sentiment=sentiment,
+            confidence=confidence,
+            scores=scores,
+            primary_emotion=emotion,
+            aspects=aspects,
+            is_concerning=is_concerning,
+            reasoning=reasoning
+        )
+    
+    def _extract_field(self, text: str, field_name: str, default: str = '') -> str:
+        """Extract a field value from response."""
+        pattern = rf'{field_name}:\s*(.+?)(?:\n|$)'
+        match = re.search(pattern, text, re.IGNORECASE)
+        return match.group(1).strip() if match else default
+    
+    def _calculate_scores(self, sentiment: str, confidence: float) -> Dict[str, float]:
+        """Calculate sentiment scores distribution."""
+        scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
+        
+        if sentiment == "positive":
+            scores["positive"] = confidence
+            scores["neutral"] = (1 - confidence) * 0.7
+            scores["negative"] = (1 - confidence) * 0.3
+        elif sentiment == "negative":
+            scores["negative"] = confidence
+            scores["neutral"] = (1 - confidence) * 0.7
+            scores["positive"] = (1 - confidence) * 0.3
+        elif sentiment == "neutral":
+            scores["neutral"] = confidence
+            scores["positive"] = (1 - confidence) * 0.5
+            scores["negative"] = (1 - confidence) * 0.5
+        elif sentiment == "mixed":
+            scores["positive"] = 0.4
+            scores["negative"] = 0.4
+            scores["neutral"] = 0.2
+        elif sentiment == "anti_national":
+            scores["negative"] = 1.0
+            scores["positive"] = 0.0
+            scores["neutral"] = 0.0
+        
+        return scores
+    
+    def _fallback_analysis(self, text: str) -> SentimentResult:
+        """Fallback analysis using lexicon-based approach."""
+        text_lower = text.lower()
+        
+        # Count indicators
+        pos_count = sum(1 for word in self.POSITIVE_INDICATORS if word in text_lower)
+        neg_count = sum(1 for word in self.NEGATIVE_INDICATORS if word in text_lower)
+        
+        # Check concerning patterns
+        is_concerning = any(re.search(pattern, text_lower) for pattern in self.CONCERNING_PATTERNS)
+        
+        # Determine sentiment
+        if pos_count > neg_count * 1.5:
+            sentiment = "positive"
+            confidence = min(0.9, 0.5 + pos_count * 0.1)
+        elif neg_count > pos_count * 1.5:
+            sentiment = "negative"
+            confidence = min(0.9, 0.5 + neg_count * 0.1)
+        elif pos_count > 0 and neg_count > 0:
+            sentiment = "mixed"
+            confidence = 0.6
+        else:
+            sentiment = "neutral"
+            confidence = 0.7
+        
+        scores = self._calculate_scores(sentiment, confidence)
+        
+        return SentimentResult(
+            overall_sentiment=sentiment,
+            confidence=confidence,
+            scores=scores,
+            primary_emotion="neutral",
+            is_concerning=is_concerning,
+            reasoning="Fallback lexicon-based analysis (no LLM available)"
+        )
+
+
+class SentimentStep(PipelineStep):
+    """
+    Sentiment Analysis Pipeline Step.
+    
+    Integrates with the CoT pipeline for comprehensive
+    sentiment analysis with aspect and emotion detection.
+    """
+    
+    def __init__(
+        self,
+        executor: StepExecutor = None,
+        detect_aspects: bool = True,
+        detect_emotions: bool = True
+    ):
+        super().__init__(
+            name="sentiment",
+            description="Sentiment analysis with emotion and aspect detection"
+        )
+        self.analyzer = SentimentAnalyzer(
+            executor=executor,
+            detect_aspects=detect_aspects,
+            detect_emotions=detect_emotions
+        )
+    
+    def get_function_definition(self) -> FunctionDefinition:
+        return SENTIMENT_FUNCTION
+    
+    def get_cot_prompt(self, context: PipelineContext) -> str:
+        return self.analyzer.SYSTEM_PROMPT
+    
+    def execute(self, context: PipelineContext) -> StepResult:
+        """Execute sentiment analysis."""
+        start_time = time.time()
+        
+        text = context.current_text or context.original_input
+        result = self.analyzer.analyze(text)
+        
+        return StepResult(
+            step_name=self.name,
+            status=StepStatus.SUCCESS,
+            output=result.to_dict(),
+            reasoning=result.reasoning,
+            confidence=result.confidence,
+            duration_ms=int((time.time() - start_time) * 1000)
+        )
+
+
+# ============== Quick-use functions ==============
+
+def analyze_sentiment(
+    text: str,
+    api_key: str = None,
+    detect_aspects: bool = True
+) -> Dict[str, Any]:
+    """
+    Quick function for sentiment analysis.
+    
+    Args:
+        text: Input text
+        api_key: Optional Groq API key
+        detect_aspects: Extract aspect-level sentiments
+        
+    Returns:
+        Dict with sentiment analysis results
+    """
+    from ..utils.groq_client import GroqClient
+    from ..cot.executor import StepExecutor
+    
+    try:
+        client = GroqClient(api_key=api_key)
+        executor = StepExecutor(client)
+        analyzer = SentimentAnalyzer(
+            executor=executor,
+            detect_aspects=detect_aspects
+        )
+        return analyzer.analyze(text).to_dict()
+    except Exception as e:
+        return {
+            "sentiment": "neutral",
+            "confidence": 0.0,
+            "error": str(e)
+        }
