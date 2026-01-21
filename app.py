@@ -56,7 +56,7 @@ def process_text(text: str, options: dict):
         return None
 
 def main():
-    st.title("🧠 Chain of Thought Analytics")
+    st.title("Rutwik")
     
     # --- Session State for Input ---
     if 'input_text' not in st.session_state:
