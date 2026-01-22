@@ -55,6 +55,33 @@ def process_text(text: str, options: dict):
         st.error(f"Error processing text: {str(e)}")
         return None
 
+
+def process_uploaded_file(file_bytes: bytes, filename: str, options: dict):
+    """Call the backend API to process an uploaded file."""
+    try:
+        # Prepare multipart form data
+        files = {"file": (filename, file_bytes)}
+        data = {
+            "semantic_clean": str(options.get("semantic_clean", False)).lower(),
+            "ner": str(options.get("ner", False)).lower(),
+            "events": str(options.get("events", False)).lower(),
+            "sentiment": str(options.get("sentiment", False)).lower(),
+            "summary": str(options.get("summary", False)).lower(),
+            "summary_style": options.get("summary_style", "bullets"),
+            "translate": str(options.get("translate", False)).lower(),
+            "relevancy": str(options.get("relevancy", False)).lower(),
+            "enable_country": str(options.get("enable_country", False)).lower(),
+        }
+        
+        response = requests.post(f"{API_URL}/upload", files=files, data=data)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.ConnectionError:
+        st.error(f"Cannot connect to backend API at {API_URL}. Is it running?")
+        return None
+    except Exception as e:
+        st.error(f"Error processing file: {str(e)}")
+        return None
 def main():
     st.title("Rutwik")
     
@@ -80,31 +107,54 @@ def main():
         summary_style = st.selectbox("Summary Style", ["bullets", "paragraph", "executive", "headlines", "tldr"], index=0)
         custom_topics = st.text_input("Relevancy Topics", placeholder="Topics like Crypto, AI...")
 
-    # --- Input Section ---
-    text_input = st.text_area("Input Text", height=150, placeholder="Paste your text here...", key="user_input_area")
-    process_btn = st.button("Analyze Text 🚀", type="primary", use_container_width=True)
+    # --- Input Section with Tabs ---
+    input_tab, file_tab = st.tabs(["📝 Text Input", "📄 File Upload"])
+    
+    with input_tab:
+        text_input = st.text_area("Input Text", height=150, placeholder="Paste your text here...", key="user_input_area")
+        process_text_btn = st.button("Analyze Text 🚀", type="primary", use_container_width=True, key="text_btn")
+    
+    with file_tab:
+        uploaded_file = st.file_uploader(
+            "Upload PDF or Image",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            help="Supported: PDF, PNG, JPG, JPEG, WEBP"
+        )
+        if uploaded_file:
+            st.info(f"📎 **{uploaded_file.name}** ({uploaded_file.size / 1024:.1f} KB)")
+        process_file_btn = st.button("Analyze File 🚀", type="primary", use_container_width=True, key="file_btn", disabled=not uploaded_file)
 
-    if process_btn and text_input:
-        st.session_state.input_text = text_input # Save to session
-        
-        options = {
-            "semantic_clean": enable_semantic,
-            "ner": enable_ner,
-            "relationships": True,
-            "events": enable_events,
-            "enable_country": enable_country,
-            "sentiment": enable_sentiment,
-            "summary": enable_summary,
-            "summary_style": summary_style,
-            "translate": enable_translate,
-            "relevancy": enable_relevancy,
-            "topics": custom_topics
-        }
-        
-        with st.spinner("Processing..."):
+    # Build options dict (shared)
+    options = {
+        "semantic_clean": enable_semantic,
+        "ner": enable_ner,
+        "relationships": True,
+        "events": enable_events,
+        "enable_country": enable_country,
+        "sentiment": enable_sentiment,
+        "summary": enable_summary,
+        "summary_style": summary_style,
+        "translate": enable_translate,
+        "relevancy": enable_relevancy,
+        "topics": custom_topics
+    }
+
+    # Handle text processing
+    if process_text_btn and text_input:
+        st.session_state.input_text = text_input
+        with st.spinner("Processing text..."):
             data = process_text(text_input, options)
-            
-        if data:
+    
+    # Handle file processing
+    elif process_file_btn and uploaded_file:
+        with st.spinner(f"Processing {uploaded_file.name}..."):
+            # Read file and send to API
+            file_bytes = uploaded_file.read()
+            data = process_uploaded_file(file_bytes, uploaded_file.name, options)
+    else:
+        data = None
+        
+    if data:
             results = data.get("results", {})
             duration = data.get("duration_ms", 0)
             

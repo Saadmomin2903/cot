@@ -9,12 +9,13 @@ import sys
 import time
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 from src.cot.pipeline import CoTPipeline, PipelineConfig
 from src.utils.groq_client import GroqClient
+from src.ingestors import InputRouter
 
 # Load environment variables
 load_dotenv()
@@ -134,6 +135,82 @@ async def process_text(request: PipelineRequest):
     except Exception as e:
         duration = int((time.time() - start_time) * 1000)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/upload", response_model=PipelineResponse)
+async def process_file(
+    file: UploadFile = File(..., description="PDF or Image file to process"),
+    semantic_clean: bool = Form(False),
+    ner: bool = Form(False),
+    events: bool = Form(False),
+    sentiment: bool = Form(False),
+    summary: bool = Form(False),
+    summary_style: str = Form("bullets"),
+    translate: bool = Form(False),
+    relevancy: bool = Form(False),
+    enable_country: bool = Form(False),
+):
+    """
+    Upload a file (PDF or Image) and process through the pipeline.
+    
+    Supported formats:
+    - PDF (.pdf)
+    - Images (.png, .jpg, .jpeg, .webp)
+    """
+    start_time = time.time()
+    
+    try:
+        # Check API key
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="GROQ_API_KEY not set")
+        
+        # Read file content
+        content = await file.read()
+        
+        # Route and extract text
+        router = InputRouter(api_key=api_key)
+        routed = router.route_bytes(content, file.filename)
+        
+        # Configure pipeline
+        config = PipelineConfig(
+            enable_validation=True,
+            enable_domain_detection=True,
+            enable_semantic_cleaning=semantic_clean,
+            enable_ner=ner,
+            enable_relationships=True,
+            enable_events=events,
+            enable_sentiment=sentiment,
+            enable_summary=summary,
+            summary_style=summary_style,
+            enable_translation=translate,
+            enable_relevancy=relevancy,
+            enable_country=enable_country,
+        )
+        
+        # Run pipeline on extracted text
+        pipeline = CoTPipeline(api_key=api_key, pipeline_config=config)
+        results = pipeline.run(routed.text)
+        
+        # Add file metadata to results
+        results["file_metadata"] = {
+            "filename": file.filename,
+            "input_type": routed.input_type.value,
+            "source_metadata": routed.metadata,
+        }
+        
+        duration = int((time.time() - start_time) * 1000)
+        
+        return PipelineResponse(
+            status="success",
+            results=results,
+            metadata=results.get("metadata", {}),
+            duration_ms=duration
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn

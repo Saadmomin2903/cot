@@ -20,3 +20,8 @@ fastapi>=0.109.0
 uvicorn>=0.27.0
 streamlit>=1.31.0
 pydantic>=2.6.0
+
+# Multi-modal input (PDF + Image)
+pypdf>=3.0.0                   # PDF text extraction
+Pillow>=10.0.0                 # Image processing
+python-multipart>=0.0.6        # File upload support
