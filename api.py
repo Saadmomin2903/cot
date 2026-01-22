@@ -58,6 +58,12 @@ class PipelineRequest(BaseModel):
     skip_validation: bool = Field(False, description="Skip validation step")
     skip_domain: bool = Field(False, description="Skip domain detection")
     skip_llm: bool = Field(False, description="Skip all LLM steps (local only)")
+    
+    # Optimization features
+    enable_collaborative_review: bool = Field(False, description="Enable collaborative review (CoLLM) for improved quality")
+    enable_hallucination_detection: bool = Field(False, description="Enable hallucination detection for generated content")
+    enable_memory_optimization: bool = Field(True, description="Enable intelligent memory/context management")
+    token_budget: int = Field(4096, description="Token budget for optimization")
 
 class PipelineResponse(BaseModel):
     status: str
@@ -108,7 +114,12 @@ async def process_text(request: PipelineRequest):
             enable_relevancy=request.relevancy and not request.skip_llm,
             enable_country=request.enable_country and not request.skip_llm,
             relevancy_topics=custom_topics,
-            use_self_consistency=request.self_consistency
+            use_self_consistency=request.self_consistency,
+            # New optimization features
+            enable_collaborative_review=request.enable_collaborative_review and not request.skip_llm,
+            enable_hallucination_detection=request.enable_hallucination_detection and not request.skip_llm,
+            enable_memory_optimization=request.enable_memory_optimization,
+            token_budget=request.token_budget
         )
         
         # Initialize pipeline

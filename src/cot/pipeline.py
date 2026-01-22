@@ -23,6 +23,7 @@ from .steps import (
 )
 from ..utils.groq_client import GroqClient
 from ..utils.text_normalizer import to_text
+from ..utils.token_optimizer import TokenBudget
 from ..config import config
 
 
@@ -45,6 +46,11 @@ class PipelineConfig:
     use_self_consistency: bool = False
     max_retries_per_step: int = 2
     skip_on_failure: bool = True  # Continue even if a step fails
+    # New optimization features
+    enable_collaborative_review: bool = False  # Chain of LLMs - collaborative review
+    enable_hallucination_detection: bool = False  # Detect hallucinations in outputs
+    enable_memory_optimization: bool = True  # Intelligent memory/context management
+    token_budget: int = 4096  # Token budget for optimization
 
 
 class CoTPipeline:
@@ -82,9 +88,18 @@ class CoTPipeline:
         if api_key or config.groq.api_key:
             try:
                 client = GroqClient(api_key=api_key)
-                self.executor = StepExecutor(client)
+                token_budget = TokenBudget(total_budget=self.config.token_budget)
+                self.executor = StepExecutor(client, token_budget=token_budget)
             except Exception:
                 pass  # Continue without LLM executor
+        
+        # Initialize memory manager if enabled
+        self.memory_manager = None
+        if self.config.enable_memory_optimization:
+            from .memory_manager import MemoryManager
+            self.memory_manager = MemoryManager(
+                max_context_tokens=self.config.token_budget // 2
+            )
         
         # Initialize steps
         self.steps = self._build_steps()

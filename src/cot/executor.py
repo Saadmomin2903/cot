@@ -14,6 +14,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 from ..utils.groq_client import GroqClient
+from ..utils.token_optimizer import PromptBuilder, TokenBudget, count_tokens_approximate
 from . import (
     FunctionDefinition, StepResult, StepStatus, PipelineContext
 )
@@ -30,11 +31,13 @@ class StepExecutor:
     - Output validation
     """
     
-    def __init__(self, groq_client: GroqClient = None):
+    def __init__(self, groq_client: GroqClient = None, token_budget: TokenBudget = None):
         """Initialize with Groq client."""
         self.client = groq_client or GroqClient()
         self.max_retries = 3
         self.retry_delay = 1.0
+        self.token_budget = token_budget or TokenBudget()
+        self.prompt_builder = PromptBuilder()
     
     def execute_with_function(
         self,
@@ -66,13 +69,36 @@ class StepExecutor:
             system_prompt, function_def, context
         )
         
+        # Optimize prompts for token efficiency
+        optimized_system, sys_tokens = self.prompt_builder.optimizer.compress_prompt(
+            full_system,
+            max_tokens=1500  # Reserve tokens for user prompt and response
+        )
+        optimized_user, user_tokens = self.prompt_builder.optimizer.compress_prompt(
+            user_prompt,
+            max_tokens=2000
+        )
+        
+        # Track token usage
+        estimated_prompt_tokens = sys_tokens + user_tokens
+        
         for attempt in range(self.max_retries):
             try:
                 # Call LLM with JSON mode for structured output
                 response = self.client.chat_json(
-                    system_prompt=full_system,
-                    user_prompt=user_prompt,
+                    system_prompt=optimized_system,
+                    user_prompt=optimized_user,
                     temperature=temperature
+                )
+                
+                # Estimate completion tokens (rough)
+                response_str = json.dumps(response)
+                estimated_completion_tokens = count_tokens_approximate(response_str)
+                
+                # Update token budget
+                self.token_budget.add_usage(
+                    estimated_prompt_tokens,
+                    estimated_completion_tokens
                 )
                 
                 # Validate response has required fields
@@ -90,6 +116,7 @@ class StepExecutor:
                         reasoning=response.get("reasoning", ""),
                         confidence=response.get("confidence", 1.0),
                         validation_notes=validation_notes,
+                        tokens_used=estimated_prompt_tokens + estimated_completion_tokens,
                         duration_ms=duration_ms
                     )
                 else:
@@ -143,7 +170,7 @@ class StepExecutor:
         function_def: FunctionDefinition,
         context: PipelineContext
     ) -> str:
-        """Build system prompt with CoT instructions and context."""
+        """Build system prompt with enhanced CoT instructions and context."""
         
         # Get previous step summaries for context passing
         previous_context = context.get_chain_summary()
@@ -154,12 +181,35 @@ class StepExecutor:
         prompt_parts = [
             base_prompt,
             "",
-            "## Chain-of-Thought Instructions",
-            "Think step-by-step before providing your answer:",
-            "1. First, understand what is being asked",
-            "2. Then, analyze the input systematically",
-            "3. Consider edge cases and potential issues",
-            "4. Finally, provide your structured output",
+            "## Enhanced Chain-of-Thought Instructions",
+            "Follow this systematic reasoning process:",
+            "",
+            "### Step 1: Understanding",
+            "- Read the task carefully and identify what is being asked",
+            "- Note any constraints or requirements",
+            "- Identify the type of output expected",
+            "",
+            "### Step 2: Analysis",
+            "- Break down the input into components",
+            "- Identify key information, patterns, and relationships",
+            "- Note any ambiguities or edge cases",
+            "",
+            "### Step 3: Self-Questioning",
+            "- Ask yourself: 'What evidence supports this conclusion?'",
+            "- Ask yourself: 'Are there alternative interpretations?'",
+            "- Ask yourself: 'What could I be missing?'",
+            "- Ask yourself: 'Is this consistent with the context?'",
+            "",
+            "### Step 4: Verification",
+            "- Check your reasoning for logical consistency",
+            "- Verify claims against the source material",
+            "- Identify any assumptions you're making",
+            "- Consider potential errors or biases",
+            "",
+            "### Step 5: Synthesis",
+            "- Combine your analysis into a coherent answer",
+            "- Ensure all required fields are addressed",
+            "- Provide clear reasoning for your conclusions",
             "",
         ]
         
@@ -174,8 +224,11 @@ class StepExecutor:
             "## Required Output Format",
             schema_instruction,
             "",
-            "IMPORTANT: You MUST respond with valid JSON matching the schema above.",
-            "Include your step-by-step reasoning in the 'reasoning' field if available.",
+            "IMPORTANT:",
+            "- You MUST respond with valid JSON matching the schema above",
+            "- Include detailed step-by-step reasoning in the 'reasoning' field",
+            "- Be explicit about your thought process and decision-making",
+            "- If uncertain, indicate your confidence level clearly",
         ])
         
         return "\n".join(prompt_parts)

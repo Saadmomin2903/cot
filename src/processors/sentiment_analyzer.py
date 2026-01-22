@@ -75,7 +75,7 @@ class SentimentResult:
 # Function definition for CoT executor
 SENTIMENT_FUNCTION = FunctionDefinition(
     name="analyze_sentiment",
-    description="Analyze text sentiment with aspect-based details",
+    description="Analyze text sentiment with aspect-based details and anti-national detection",
     parameters={
         "sentiment": {
             "type": "string",
@@ -85,6 +85,16 @@ SENTIMENT_FUNCTION = FunctionDefinition(
         "confidence": {
             "type": "number",
             "description": "Confidence score 0-1"
+        },
+        "scores": {
+            "type": "object",
+            "properties": {
+                "positive": {"type": "number", "description": "Positive sentiment score (0-1)"},
+                "negative": {"type": "number", "description": "Negative sentiment score (0-1)"},
+                "neutral": {"type": "number", "description": "Neutral sentiment score (0-1)"},
+                "anti_national": {"type": "number", "description": "Anti-national sentiment score (0-1)"}
+            },
+            "description": "Scores for each sentiment category (should sum to ~1.0)"
         },
         "emotion": {
             "type": "string",
@@ -108,7 +118,7 @@ SENTIMENT_FUNCTION = FunctionDefinition(
             "description": "Chain of thought reasoning"
         }
     },
-    required=["sentiment", "confidence", "reasoning"]
+    required=["sentiment", "confidence", "scores", "reasoning"]
 )
 
 
@@ -136,17 +146,17 @@ class SentimentAnalyzer:
         print(result.aspects)  # [{"aspect": "UI", "sentiment": "positive"}, ...]
     """
     
-    SYSTEM_PROMPT = """You are an expert sentiment analyst specializing in nuanced text understanding.
+    SYSTEM_PROMPT = """You are an expert sentiment analyst specializing in nuanced text understanding and anti-national content detection.
 
 ## Your Task
-Analyze the sentiment of the input text comprehensively.
+Analyze the sentiment of the input text comprehensively, including detection of anti-national content.
 
 ## Sentiment Classes
 - positive: Overall positive tone, approval, satisfaction, happiness
 - negative: Overall negative tone, disapproval, dissatisfaction, unhappiness
 - neutral: Factual, objective, no clear emotional tone
 - mixed: Contains both positive and negative sentiments
-- anti_national: Content acting against national interests, promoting separatism, or incitement (Treat as a primary category if detected)
+- anti_national: Content acting against national interests, promoting separatism, incitement, or hatred toward nation/people
 
 ## Emotion Classes (fine-grained)
 - joy: happiness, contentment, pleasure
@@ -158,28 +168,39 @@ Analyze the sentiment of the input text comprehensively.
 - trust: confidence, faith, reliability
 - anticipation: expectation, hope, excitement
 
-## Special Detection: Anti-National/Concerning Content
-Flag content that shows:
+## Special Detection: Anti-National Content
+Detect and score anti-national content that shows:
 - Hatred toward a nation or its people
-- Incitement of violence
-- Promotion of terrorism or separatism
-- Blasphemy or hate speech
+- Incitement of violence against national institutions
+- Promotion of terrorism, separatism, or sedition
+- Blasphemy or hate speech against national symbols
 - Deliberate misinformation against national interest
+- Calls to destroy or overthrow constitutional institutions
+- Anti-national slogans or chants
+
+IMPORTANT: Anti-national is a SEPARATE score category. Provide scores for:
+- positive (0.0-1.0)
+- negative (0.0-1.0)
+- neutral (0.0-1.0)
+- anti_national (0.0-1.0)
+
+Scores should sum to approximately 1.0. If anti-national content is detected, assign a score (0.0-1.0) to anti_national.
 
 ## Chain-of-Thought Analysis
 1. Read the text carefully
 2. Identify overall tone
 3. Detect emotions expressed
 4. Find aspect-specific sentiments
-5. Check for concerning patterns
-6. Assign confidence based on clarity
+5. Check for anti-national patterns (separately)
+6. Assign scores to all four categories (positive, negative, neutral, anti_national)
+7. Assign confidence based on clarity
 
 ## Output Format
-SENTIMENT: [positive/negative/neutral/mixed]
+SENTIMENT: [positive/negative/neutral/mixed/anti_national]
 CONFIDENCE: [0.0-1.0]
+SCORES: positive=[0.0-1.0], negative=[0.0-1.0], neutral=[0.0-1.0], anti_national=[0.0-1.0]
 EMOTION: [primary emotion]
 ASPECTS: [aspect1:sentiment, aspect2:sentiment, ...]
-CONCERNING: [yes/no with reason if yes]
 REASONING: [your analysis]"""
 
     # Words indicating different sentiments
@@ -239,54 +260,101 @@ REASONING: [your analysis]"""
         return self._analyze_with_llm(text)
     
     def _analyze_with_llm(self, text: str) -> SentimentResult:
-        """Analyze using LLM with chain-of-thought."""
+        """Analyze using LLM with chain-of-thought and structured output."""
         user_prompt = f"""Analyze the sentiment of the following text:
 
 ## Text
 {text[:4000]}
 
 ## Analysis Requirements
-1. Overall sentiment (positive/negative/neutral/mixed)
+1. Overall sentiment (positive/negative/neutral/mixed/anti_national)
 2. Confidence level (0.0 to 1.0)
-3. Primary emotion detected
-4. Aspect-based sentiments (if multiple topics/entities)
-5. Check for anti-national or concerning content
+3. Scores for ALL categories:
+   - positive: 0.0-1.0
+   - negative: 0.0-1.0
+   - neutral: 0.0-1.0
+   - anti_national: 0.0-1.0 (score if anti-national content detected)
+4. Primary emotion detected
+5. Aspect-based sentiments (if multiple topics/entities)
 6. Provide reasoning for your analysis
 
-## Output Format
-SENTIMENT: [your classification]
-CONFIDENCE: [0.0-1.0]
-EMOTION: [primary emotion]
-ASPECTS: [aspect1:sentiment (confidence), aspect2:sentiment (confidence), ...]
-CONCERNING: [yes/no] - [reason if yes]
-REASONING: [your chain-of-thought analysis]
+IMPORTANT: Always provide scores for all four categories. If anti-national content is detected, assign a score to anti_national (0.0 if none detected).
 
 Analyze now:"""
 
         try:
-            messages = [
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt}
-            ]
+            # Try using structured function calling if available
+            from ..cot import PipelineContext
             
-            response = self.executor.client.chat(
-                messages=messages,
+            context = PipelineContext(original_input=text, current_text=text)
+            
+            # Use execute_with_function for structured output
+            result = self.executor.execute_with_function(
+                step_name="sentiment_analysis",
+                system_prompt=self.SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                function_def=SENTIMENT_FUNCTION,
+                context=context,
                 temperature=0.2
             )
             
-            return self._parse_result(response)
+            if result.status == StepStatus.SUCCESS:
+                output = result.output
+                # Extract scores from structured output
+                scores = output.get("scores", {})
+                # Ensure all four scores are present
+                if "anti_national" not in scores:
+                    scores["anti_national"] = 0.0
+                if "positive" not in scores:
+                    scores["positive"] = 0.0
+                if "negative" not in scores:
+                    scores["negative"] = 0.0
+                if "neutral" not in scores:
+                    scores["neutral"] = 0.0
+                
+                # Normalize scores to sum to 1.0
+                total = sum(scores.values())
+                if total > 0:
+                    scores = {k: v / total for k, v in scores.items()}
+                
+                return SentimentResult(
+                    overall_sentiment=output.get("sentiment", "neutral"),
+                    confidence=output.get("confidence", 0.5),
+                    scores=scores,
+                    primary_emotion=output.get("emotion", "neutral"),
+                    aspects=output.get("aspects", []),
+                    is_concerning=scores.get("anti_national", 0.0) > 0.3,
+                    reasoning=output.get("reasoning", "")
+                )
+            else:
+                # Fallback to text parsing if structured output failed
+                return self._fallback_analysis(text)
             
         except Exception as e:
-            return self._fallback_analysis(text)
+            # Fallback to manual parsing if function calling not available
+            try:
+                messages = [
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt}
+                ]
+                
+                response = self.executor.client.chat(
+                    messages=messages,
+                    temperature=0.2
+                )
+                
+                return self._parse_result(response)
+            except:
+                return self._fallback_analysis(text)
     
     def _parse_result(self, response: str) -> SentimentResult:
         """Parse LLM response into SentimentResult."""
         # Extract fields
         sentiment = self._extract_field(response, 'SENTIMENT', 'neutral').lower()
         confidence_str = self._extract_field(response, 'CONFIDENCE', '0.5')
+        scores_str = self._extract_field(response, 'SCORES', '')
         emotion = self._extract_field(response, 'EMOTION', 'neutral').lower()
         aspects_str = self._extract_field(response, 'ASPECTS', '')
-        concerning_str = self._extract_field(response, 'CONCERNING', 'no')
         reasoning = self._extract_field(response, 'REASONING', '')
         
         # Parse confidence
@@ -295,6 +363,9 @@ Analyze now:"""
             confidence = min(1.0, max(0.0, confidence))
         except:
             confidence = 0.5
+        
+        # Parse scores from SCORES field
+        scores = self._parse_scores(scores_str, sentiment, confidence)
         
         # Parse aspects
         aspects = []
@@ -310,11 +381,8 @@ Analyze now:"""
                     "confidence": aspect_conf
                 })
         
-        # Check concerning flag
-        is_concerning = 'yes' in concerning_str.lower()
-        
-        # Build scores
-        scores = self._calculate_scores(sentiment, confidence)
+        # Check if concerning based on anti_national score
+        is_concerning = scores.get('anti_national', 0.0) > 0.3
         
         return SentimentResult(
             overall_sentiment=sentiment,
@@ -326,6 +394,42 @@ Analyze now:"""
             reasoning=reasoning
         )
     
+    def _parse_scores(self, scores_str: str, sentiment: str, confidence: float) -> Dict[str, float]:
+        """Parse scores from SCORES field or calculate from sentiment."""
+        scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0, "anti_national": 0.0}
+        
+        # Try to parse scores from SCORES field
+        if scores_str:
+            # Pattern: positive=0.5, negative=0.3, neutral=0.2, anti_national=0.0
+            score_patterns = {
+                'positive': r'positive\s*=\s*([\d.]+)',
+                'negative': r'negative\s*=\s*([\d.]+)',
+                'neutral': r'neutral\s*=\s*([\d.]+)',
+                'anti_national': r'anti_national\s*=\s*([\d.]+)'
+            }
+            
+            parsed = False
+            for key, pattern in score_patterns.items():
+                match = re.search(pattern, scores_str, re.IGNORECASE)
+                if match:
+                    try:
+                        scores[key] = float(match.group(1))
+                        parsed = True
+                    except:
+                        pass
+            
+            # If we parsed scores, normalize them
+            if parsed:
+                total = sum(scores.values())
+                if total > 0:
+                    # Normalize to sum to 1.0
+                    for key in scores:
+                        scores[key] = scores[key] / total
+                return scores
+        
+        # Fallback: calculate scores from sentiment
+        return self._calculate_scores(sentiment, confidence)
+    
     def _extract_field(self, text: str, field_name: str, default: str = '') -> str:
         """Extract a field value from response."""
         pattern = rf'{field_name}:\s*(.+?)(?:\n|$)'
@@ -333,29 +437,47 @@ Analyze now:"""
         return match.group(1).strip() if match else default
     
     def _calculate_scores(self, sentiment: str, confidence: float) -> Dict[str, float]:
-        """Calculate sentiment scores distribution."""
-        scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
+        """Calculate sentiment scores distribution including anti-national."""
+        scores = {"positive": 0.0, "negative": 0.0, "neutral": 0.0, "anti_national": 0.0}
         
         if sentiment == "positive":
             scores["positive"] = confidence
             scores["neutral"] = (1 - confidence) * 0.7
             scores["negative"] = (1 - confidence) * 0.3
+            scores["anti_national"] = 0.0
         elif sentiment == "negative":
             scores["negative"] = confidence
             scores["neutral"] = (1 - confidence) * 0.7
             scores["positive"] = (1 - confidence) * 0.3
+            scores["anti_national"] = 0.0
         elif sentiment == "neutral":
             scores["neutral"] = confidence
             scores["positive"] = (1 - confidence) * 0.5
             scores["negative"] = (1 - confidence) * 0.5
+            scores["anti_national"] = 0.0
         elif sentiment == "mixed":
             scores["positive"] = 0.4
             scores["negative"] = 0.4
             scores["neutral"] = 0.2
+            scores["anti_national"] = 0.0
         elif sentiment == "anti_national":
-            scores["negative"] = 1.0
-            scores["positive"] = 0.0
-            scores["neutral"] = 0.0
+            # Anti-national gets primary score, rest distributed
+            scores["anti_national"] = confidence
+            scores["negative"] = (1 - confidence) * 0.6  # Anti-national is also negative
+            scores["neutral"] = (1 - confidence) * 0.3
+            scores["positive"] = (1 - confidence) * 0.1
+        else:
+            # Default fallback
+            scores["neutral"] = confidence
+            scores["positive"] = (1 - confidence) * 0.5
+            scores["negative"] = (1 - confidence) * 0.5
+            scores["anti_national"] = 0.0
+        
+        # Ensure scores sum to approximately 1.0
+        total = sum(scores.values())
+        if total > 0:
+            for key in scores:
+                scores[key] = scores[key] / total
         
         return scores
     
@@ -367,11 +489,14 @@ Analyze now:"""
         pos_count = sum(1 for word in self.POSITIVE_INDICATORS if word in text_lower)
         neg_count = sum(1 for word in self.NEGATIVE_INDICATORS if word in text_lower)
         
-        # Check concerning patterns
+        # Check concerning patterns (anti-national detection)
         is_concerning = any(re.search(pattern, text_lower) for pattern in self.CONCERNING_PATTERNS)
         
         # Determine sentiment
-        if pos_count > neg_count * 1.5:
+        if is_concerning:
+            sentiment = "anti_national"
+            confidence = min(0.9, 0.6 + 0.1)  # Higher confidence for detected patterns
+        elif pos_count > neg_count * 1.5:
             sentiment = "positive"
             confidence = min(0.9, 0.5 + pos_count * 0.1)
         elif neg_count > pos_count * 1.5:

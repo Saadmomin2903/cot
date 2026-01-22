@@ -103,6 +103,12 @@ def main():
             enable_summary = st.checkbox("📝 Summary", value=True)
             enable_relevancy = st.checkbox("🎯 Relevancy", value=True)
         
+        with st.expander("⚡ Optimization Features", expanded=False):
+            enable_collaborative_review = st.checkbox("🤝 Collaborative Review (CoLLM)", value=False, help="Multiple review perspectives for improved quality")
+            enable_hallucination_detection = st.checkbox("🔍 Hallucination Detection", value=False, help="Detect unsupported claims and factual errors")
+            enable_memory_opt = st.checkbox("💾 Memory Optimization", value=True, help="Intelligent context management (recommended)")
+            token_budget = st.number_input("Token Budget", min_value=1024, max_value=8192, value=4096, step=512, help="Maximum tokens for processing")
+        
         st.divider()
         summary_style = st.selectbox("Summary Style", ["bullets", "paragraph", "executive", "headlines", "tldr"], index=0)
         custom_topics = st.text_input("Relevancy Topics", placeholder="Topics like Crypto, AI...")
@@ -136,7 +142,12 @@ def main():
         "summary_style": summary_style,
         "translate": enable_translate,
         "relevancy": enable_relevancy,
-        "topics": custom_topics
+        "topics": custom_topics,
+        # New optimization features
+        "enable_collaborative_review": enable_collaborative_review,
+        "enable_hallucination_detection": enable_hallucination_detection,
+        "enable_memory_optimization": enable_memory_opt,
+        "token_budget": token_budget
     }
 
     # Handle text processing
@@ -276,10 +287,40 @@ def main():
                         chart_data = {t['topic']: t['score'] for t in r_scores}
                         st.bar_chart(chart_data, color="#FF4B4B") # Streamlit red color
                         
-                # Show Sentiment Aspects here if available (to fill space)
+                # Show Sentiment Scores and Aspects
                 sent_key = next((k for k in results.keys() if "sentiment" in k), None)
                 if sent_key and results[sent_key]["status"] == "success":
-                    aspects = results[sent_key]["output"].get("aspects", [])
+                    s_out = results[sent_key]["output"]
+                    scores = s_out.get("scores", {})
+                    
+                    # Display sentiment scores (positive, negative, neutral, anti_national)
+                    if scores:
+                        st.subheader("💭 Sentiment Scores")
+                        score_data = {
+                            "Positive": scores.get("positive", 0.0),
+                            "Negative": scores.get("negative", 0.0),
+                            "Neutral": scores.get("neutral", 0.0),
+                            "Anti-National": scores.get("anti_national", 0.0)
+                        }
+                        # Create a bar chart for sentiment scores
+                        st.bar_chart(score_data, color="#FF4B4B")
+                        
+                        # Display scores as metrics
+                        score_cols = st.columns(4)
+                        with score_cols[0]:
+                            st.metric("Positive", f"{score_data['Positive']:.2f}")
+                        with score_cols[1]:
+                            st.metric("Negative", f"{score_data['Negative']:.2f}")
+                        with score_cols[2]:
+                            st.metric("Neutral", f"{score_data['Neutral']:.2f}")
+                        with score_cols[3]:
+                            anti_nat_score = score_data['Anti-National']
+                            st.metric("Anti-National", f"{anti_nat_score:.2f}", 
+                                     delta="⚠️" if anti_nat_score > 0.3 else None,
+                                     delta_color="inverse")
+                    
+                    # Show Sentiment Aspects if available
+                    aspects = s_out.get("aspects", [])
                     if aspects:
                         with st.expander("❤️ Sentiment Aspects"):
                             st.dataframe(pd.DataFrame(aspects), use_container_width=True)
