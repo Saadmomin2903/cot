@@ -22,6 +22,7 @@ from .steps import (
     ValidationStep
 )
 from ..utils.groq_client import GroqClient
+from ..utils.text_normalizer import to_text
 from ..config import config
 
 
@@ -181,21 +182,24 @@ class CoTPipeline:
         start_time = datetime.now(timezone.utc)
         
         # Initialize context
+        normalized_input = to_text(text)
         context = PipelineContext(
-            original_input=text,
-            current_text=text,
+            original_input=normalized_input,
+            current_text=normalized_input,
             metadata=metadata or {}
         )
         
         # Execute each step
         for step in self.steps:
             try:
+                # Defensive: some ingestors/cleaners may provide chunked list text
+                context.current_text = to_text(context.current_text or context.original_input)
                 result = step.execute(context)
                 context.add_result(result)
                 
                 # Update current_text if cleaning step
                 if step.name == "text_cleaning" and result.status == StepStatus.SUCCESS:
-                    context.current_text = result.output.get("cleaned_text", text)
+                    context.current_text = to_text(result.output.get("cleaned_text", normalized_input))
                 
                 # Handle failures
                 if result.status == StepStatus.FAILED:
@@ -284,9 +288,10 @@ class CoTPipeline:
             return {"error": f"Step '{step_name}' not found"}
         
         # Build context
+        normalized_input = to_text(text)
         context = PipelineContext(
-            original_input=text,
-            current_text=text
+            original_input=normalized_input,
+            current_text=normalized_input
         )
         
         # Add previous results if provided

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 from ..cot import PipelineStep, PipelineContext, StepResult, StepStatus, FunctionDefinition
 from ..cot.executor import StepExecutor
+from ..utils.text_normalizer import to_text
 
 
 @dataclass
@@ -367,7 +368,7 @@ class TranslationStep(PipelineStep):
         """Execute translation."""
         start_time = time.time()
         
-        text = context.current_text or context.original_input
+        text = to_text(context.current_text or context.original_input)
         result = self.translator.translate(text)
         
         # Update context with translated text

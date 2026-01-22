@@ -9,8 +9,13 @@ from dataclasses import dataclass, field
 from typing import List
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file (best-effort).
+# In some environments (e.g., sandboxed CI or restricted FS), reading `.env`
+# may raise PermissionError; treat that the same as a missing file.
+try:
+    load_dotenv()
+except (OSError, PermissionError):
+    pass
 
 
 @dataclass

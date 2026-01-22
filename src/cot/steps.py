@@ -19,6 +19,7 @@ from . import (
 from .executor import StepExecutor, SelfConsistencyExecutor
 from ..cleaners import GlobalCleaner, TempCleaner
 from ..processors import LanguageDetector
+from ..utils.text_normalizer import to_text
 
 
 class TextCleaningStep(PipelineStep):
@@ -143,7 +144,7 @@ class DomainDetectionStep(PipelineStep):
     
     def get_cot_prompt(self, context: PipelineContext) -> str:
         # Get cleaned text from previous step
-        cleaned_text = context.current_text or context.original_input
+        cleaned_text = to_text(context.current_text or context.original_input)
         
         # Truncate for LLM
         text_preview = cleaned_text[:3000] + ("..." if len(cleaned_text) > 3000 else "")

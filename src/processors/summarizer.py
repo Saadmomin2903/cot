@@ -27,6 +27,7 @@ from enum import Enum
 
 from ..cot import PipelineStep, PipelineContext, StepResult, StepStatus, FunctionDefinition
 from ..cot.executor import StepExecutor
+from ..utils.text_normalizer import to_text
 
 
 class SummaryStyle(Enum):
@@ -616,7 +617,7 @@ class SummaryStep(PipelineStep):
         """Execute summarization."""
         start_time = time.time()
         
-        text = context.current_text or context.original_input
+        text = to_text(context.current_text or context.original_input)
         result = self.summarizer.summarize(
             text,
             strategy=self.strategy,

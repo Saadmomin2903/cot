@@ -35,7 +35,7 @@ class TestGlobalCleaner:
         assert "it is" in result["text"]
     
     def test_normalize_unicode(self):
-        text = "Smart quotes: "hello""
+        text = 'Smart quotes: "hello"'
         result = self.cleaner.clean(text)
         assert '"hello"' in result["text"]
     

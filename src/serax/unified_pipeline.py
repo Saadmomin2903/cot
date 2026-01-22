@@ -28,6 +28,7 @@ from ..serax import (
 from ..serax.executor import SeraxExecutor
 from ..serax.prompts import SeraxPromptBuilder, MULTI_TASK_PROMPT
 from ..utils.groq_client import GroqClient
+from ..utils.text_normalizer import to_text
 from ..config import config
 
 
@@ -107,9 +108,10 @@ class UnifiedPipeline:
         start_time = datetime.now(timezone.utc)
         
         # Initialize context
+        normalized_input = to_text(text)
         context = PipelineContext(
-            original_input=text,
-            current_text=text
+            original_input=normalized_input,
+            current_text=normalized_input
         )
         
         results = {}
@@ -117,7 +119,7 @@ class UnifiedPipeline:
         # ===== Step 1: Text Cleaning (Local) =====
         clean_result = self.text_cleaner.execute(context)
         context.add_result(clean_result)
-        context.current_text = clean_result.output.get("cleaned_text", text)
+        context.current_text = to_text(clean_result.output.get("cleaned_text", normalized_input))
         results["1_text_cleaning"] = self._format_step_result(clean_result)
         
         # ===== Step 2: Language Detection (Local) =====
@@ -202,6 +204,7 @@ class UnifiedPipeline:
         tasks: List[str]
     ) -> Dict[str, Any]:
         """Run multi-task extraction using SERAX format."""
+        context.current_text = to_text(context.current_text or context.original_input)
         result = self.serax_executor.execute_multi_task(
             text=context.current_text[:self.options.max_text_length],
             tasks=tasks,
