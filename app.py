@@ -112,17 +112,24 @@ def main():
             st.subheader("📝 Cleaned Text & Pre-processing")
             
             # Find relevant keys
-            clean_key = next((k for k in results.keys() if "clean" in k and "global" in k or "text_clean" in k), None)
+            clean_key = next((k for k in results.keys() if "text_cleaning" in k), None)
+            semantic_key = next((k for k in results.keys() if "semantic_cleaning" in k), None)
             trans_key = next((k for k in results.keys() if "translation" in k), None)
 
             c1, c2 = st.columns(2)
             with c1:
-                if clean_key:
-                    clean_out = results[clean_key]["output"]
-                    final_text = clean_out.get("temp_cleaned", clean_out.get("global_cleaned", ""))
-                    st.markdown("**Cleaned Text**")
+                # Prefer semantic cleaned if available
+                display_key = semantic_key if semantic_key and results.get(semantic_key, {}).get("status") == "success" else clean_key
+                label = "Semantic" if display_key == semantic_key else "Basic"
+                
+                if display_key and results[display_key]["status"] == "success":
+                    clean_out = results[display_key]["output"]
+                    final_text = clean_out.get("cleaned_text", "")
+                    st.markdown(f"**Cleaned Text** *({label})*")
                     st.code(final_text, language=None)
-                    st.caption(f"Reduced by {clean_out.get('reduction_percent', 0)}%")
+                    st.caption(f"Reduced by {clean_out.get('reduction_percent', 0):.1f}%")
+                else:
+                    st.warning("Text cleaning failed or not enabled.")
             
             with c2:
                 if trans_key and results[trans_key]["status"] == "success":
