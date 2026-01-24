@@ -24,14 +24,14 @@ graph TD
     subgraph "Phase 1: Preparation"
         Context --> Cleaner[Text Cleaning Step]
         Cleaner --> LangDetect[Language Detection]
-        LangDetect --> Translator[Translation (if needed)]
+        LangDetect --> Translator["Translation (if needed)"]
     end
     
     subgraph "Phase 2: Semantic Processing"
         Translator --> Domain[Domain Detection]
-        Domain --> NER[NER & Relationships]
+        Domain --> NER["NER & Relationships"]
         Domain --> Events[Event Calendar]
-        Domain --> Sentiment[Sentiment & Emotion]
+        Domain --> Sentiment["Sentiment & Emotion"]
         Domain --> Summary[Summarization]
     end
     
